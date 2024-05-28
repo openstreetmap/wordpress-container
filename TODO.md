@@ -6,3 +6,4 @@
 * ~~Themes downloaded a build time~~
 * WPML added as required?
 * Able to sennd email. SMTP plugin wp-mail-smtp or msmtp
+* Change container internal port 80 -> 8080 (apache listen port)
