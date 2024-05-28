@@ -53,6 +53,7 @@ RUN set -eux; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
 		jq \
+        unzip \
 	; \
 	rm -rf /var/lib/apt/lists/*
 
@@ -82,7 +83,7 @@ RUN set -ex; \
 
 # TMPFS /tmp
 # TMPFS /run
-# Persistent /usr/src/wordpress/wp-content/uploads
+# Persistent /usr/src/wordpress/wp-content/uploads (wordpress:wordpress)
 
 # Add custom entrypoint to enable plugins/themes and run migrations during container startup
 COPY entrypoint-addon.sh /usr/local/bin/
