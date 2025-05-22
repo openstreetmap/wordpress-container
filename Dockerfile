@@ -1,105 +1,115 @@
-FROM docker.io/library/wordpress:cli as cli
+# syntax=docker/dockerfile:1
 
-FROM docker.io/library/wordpress:apache
+# Stage 1: PHP Extension Builder
+FROM docker.io/library/wordpress:apache AS php-ext-builder
 
+# Install build dependencies for PHP extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libonig-dev \
+    libxml2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install PHP extensions
+RUN docker-php-ext-install -j "$(nproc)" \
+    mbstring \
+    xml \
+    && pecl install igbinary \
+    && docker-php-ext-enable igbinary
+
+# Verify extensions work properly
+RUN set -eux; \
+    out="$(php -r 'exit(0);')"; \
+    [ -z "$out" ]; \
+    err="$(php -r 'exit(0);' 3>&1 1>&2 2>&3)"; \
+    [ -z "$err" ]; \
+    php --version
+
+# Stage 2: WordPress CLI
+FROM docker.io/library/wordpress:cli AS cli
+
+# Stage 3: WordPress Customizer
+FROM docker.io/library/wordpress:apache AS wordpress-customizer
+
+# Copy WordPress CLI binary
 COPY --from=cli /usr/local/bin/wp /usr/local/bin/wp
 
-RUN set -ex; \
-        \
-        savedAptMark="$(apt-mark showmanual)"; \
-        \
-        apt-get update; \
-        apt-get install -y --no-install-recommends \
-          libonig-dev \
-          libxml2-dev; \
-        \
-        docker-php-ext-install -j "$(nproc)" \
-        mbstring \
-        xml; \
-        \
-        # some misbehaving extensions end up outputting to stdout 🙈 (https://github.com/docker-library/wordpress/issues/669#issuecomment-993945967)
-        out="$(php -r 'exit(0);')"; \
-        [ -z "$out" ]; \
-        err="$(php -r 'exit(0);' 3>&1 1>&2 2>&3)"; \
-        [ -z "$err" ]; \
-        \
-        extDir="$(php -r 'echo ini_get("extension_dir");')"; \
-        [ -d "$extDir" ]; \
-        # reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-        apt-mark auto '.*' > /dev/null; \
-        apt-mark manual $savedAptMark; \
-        ldd "$extDir"/*.so \
-          | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
-          | sort -u \
-          | xargs -r dpkg-query --search \
-          | cut -d: -f1 \
-          | sort -u \
-          | xargs -rt apt-mark manual; \
-        \
-        apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-        rm -rf /var/lib/apt/lists/*; \
-        \
-        ! { ldd "$extDir"/*.so | grep 'not found'; }; \
-        # check for output like "PHP Warning:  PHP Startup: Unable to load dynamic library 'foo' (tried: ...)
-        err="$(php --version 3>&1 1>&2 2>&3)"; \
-        [ -z "$err" ]
+# Install runtime tools needed for customization
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    jq \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN set -ex; \
-      pecl install igbinary; \
-      docker-php-ext-enable igbinary
-
-# Add persistent dependencies
-RUN set -eux; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		jq \
-        unzip \
-	; \
-	rm -rf /var/lib/apt/lists/*
-
-# "define( 'WP_HOME', 'https://#{new_resource.site}');
-# "define( 'WP_SITEURL', 'https://#{new_resource.site}');
-# line += "define( 'DISALLOW_FILE_EDIT', true);\r\n"
-# line += "define( 'DISALLOW_FILE_MODS', true);\r\n"
-# line += "define( 'AUTOMATIC_UPDATER_DISABLED', true);\r\n"
-# line += "define( 'FORCE_SSL_LOGIN', true);\r\n"
-# line += "define( 'FORCE_SSL_ADMIN', true);\r\n"
-# line += "define( 'WP_FAIL2BAN_SITE_HEALTH_SKIP_FILTERS', true);\r\n"
-# line += "define( 'WP_ENVIRONMENT_TYPE', 'production');\r\n"
-# line += "define( 'WP_MEMORY_LIMIT', '128M');\r\n"
-# line += "define( 'WP2FA_ENCRYPT_KEY', '#{new_resource.wp2fa_encrypt_key}');\r\n"
-
-
+# Set up WordPress directory structure
 WORKDIR /usr/src/wordpress
 RUN set -eux; \
-        find /etc/apache2 -name '*.conf' -type f -exec sed -ri -e "s!/var/www/html!$PWD!g" -e "s!Directory /var/www/!Directory $PWD!g" '{}' +; \
-	    cp -s wp-config-docker.php wp-config.php
+    find /etc/apache2 -name '*.conf' -type f -exec sed -ri -e "s!/var/www/html!$PWD!g" -e "s!Directory /var/www/!Directory $PWD!g" '{}' +; \
+    cp -s wp-config-docker.php wp-config.php
 
-# Add custom themes and plugins
+# Install themes and plugins
 COPY wp-addon-install.sh /usr/local/bin/
-RUN set -ex; \
-        chmod +x /usr/local/bin/wp-addon-install.sh; \
-        /usr/local/bin/wp-addon-install.sh
+RUN chmod +x /usr/local/bin/wp-addon-install.sh \
+    && /usr/local/bin/wp-addon-install.sh
 
+# Stage 4: Final Runtime Image
+FROM docker.io/library/wordpress:apache
+
+# Create non-privileged user early for security
+RUN groupadd --system wordpress \
+    && useradd --system --gid wordpress --no-create-home --home /nonexistent --comment "wordpress user" --shell /bin/false wordpress
+
+# Copy PHP extensions from builder
+COPY --from=php-ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
+COPY --from=php-ext-builder /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
+
+# Copy WordPress CLI from stage 2
+COPY --from=cli /usr/local/bin/wp /usr/local/bin/wp
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Required for mbstring extension
+    libonig5 \
+    # Required for xml extension
+    libxml2 \
+    # Required for wp-cli and entrypoint operations
+    jq \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy customized WordPress from customizer stage
+COPY --from=wordpress-customizer /usr/src/wordpress /usr/src/wordpress
+COPY --from=wordpress-customizer /etc/apache2 /etc/apache2
+
+# Set working directory
+WORKDIR /usr/src/wordpress
+
+# Copy and set up custom entrypoint
+COPY entrypoint-addon.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint-addon.sh
+
+# Configure Apache to run as wordpress user
+ENV APACHE_RUN_USER=wordpress \
+    APACHE_RUN_GROUP=wordpress
+
+# Switch to non-privileged user
+USER wordpress
+
+# WordPress configuration comments for reference
+# define( 'WP_HOME', 'https://#{new_resource.site}');
+# define( 'WP_SITEURL', 'https://#{new_resource.site}');
+# define( 'DISALLOW_FILE_EDIT', true);
+# define( 'DISALLOW_FILE_MODS', true);
+# define( 'AUTOMATIC_UPDATER_DISABLED', true);
+# define( 'FORCE_SSL_LOGIN', true);
+# define( 'FORCE_SSL_ADMIN', true);
+# define( 'WP_FAIL2BAN_SITE_HEALTH_SKIP_FILTERS', true);
+# define( 'WP_ENVIRONMENT_TYPE', 'production');
+# define( 'WP_MEMORY_LIMIT', '128M');
+# define( 'WP2FA_ENCRYPT_KEY', '#{new_resource.wp2fa_encrypt_key}');
+
+# Volume mount points
 # TMPFS /tmp
 # TMPFS /run
 # Persistent /usr/src/wordpress/wp-content/uploads (wordpress:wordpress)
-
-# Add custom entrypoint to enable plugins/themes and run migrations during container startup
-COPY entrypoint-addon.sh /usr/local/bin/
-# Ensure compatibility with checkout on windows where execute bit not supported
-RUN chmod +x /usr/local/bin/wp-addon-install.sh
-
-# Add underprivileged runtime user
-RUN set -ex; \
-      groupadd --system wordpress; \
-      useradd --system --gid wordpress --no-create-home --home /nonexistent --comment "wordpress user" --shell /bin/false wordpress
-
-# Use the underprivileged runtime user
-USER wordpress
-
-ENV APACHE_RUN_USER=wordpress \
-    APACHE_RUN_GROUP=wordpress
 
 ENTRYPOINT ["entrypoint-addon.sh"]
 CMD ["apache2-foreground"]
