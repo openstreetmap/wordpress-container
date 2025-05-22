@@ -24,20 +24,17 @@ RUN set -eux; \
     [ -z "$err" ]; \
     php --version
 
-# Stage 2: WordPress CLI
+# Stage 2: Composer Stage
+FROM docker.io/library/composer:2 AS composer-stage
+
+# Stage 3: WordPress CLI
 FROM docker.io/library/wordpress:cli AS cli
 
-# Stage 3: WordPress Customizer
+# Stage 4: WordPress Customizer
 FROM docker.io/library/wordpress:apache AS wordpress-customizer
 
-# Copy WordPress CLI binary
-COPY --from=cli /usr/local/bin/wp /usr/local/bin/wp
-
-# Install runtime tools needed for customization
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
+# Copy Composer binary
+COPY --from=composer-stage /usr/bin/composer /usr/local/bin/composer
 
 # Set up WordPress directory structure
 WORKDIR /usr/src/wordpress
@@ -45,12 +42,14 @@ RUN set -eux; \
     find /etc/apache2 -name '*.conf' -type f -exec sed -ri -e "s!/var/www/html!$PWD!g" -e "s!Directory /var/www/!Directory $PWD!g" '{}' +; \
     cp -s wp-config-docker.php wp-config.php
 
-# Install themes and plugins
-COPY wp-addon-install.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/wp-addon-install.sh \
-    && /usr/local/bin/wp-addon-install.sh
+# Copy composer.json and install plugins
+COPY composer.json composer.json
+RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-# Stage 4: Final Runtime Image
+# Remove hello plugin
+RUN rm -rf wp-content/plugins/hello.php
+
+# Stage 5: Final Runtime Image
 FROM docker.io/library/wordpress:apache
 
 # Create non-privileged user early for security
@@ -61,7 +60,7 @@ RUN groupadd --system wordpress \
 COPY --from=php-ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=php-ext-builder /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
 
-# Copy WordPress CLI from stage 2
+# Copy WordPress CLI from stage 3
 COPY --from=cli /usr/local/bin/wp /usr/local/bin/wp
 
 # Install only runtime dependencies
@@ -70,9 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libonig5 \
     # Required for xml extension
     libxml2 \
-    # Required for wp-cli and entrypoint operations
+    # Required for wp-cli
     jq \
-    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy customized WordPress from customizer stage
@@ -92,24 +90,6 @@ ENV APACHE_RUN_USER=wordpress \
 
 # Switch to non-privileged user
 USER wordpress
-
-# WordPress configuration comments for reference
-# define( 'WP_HOME', 'https://#{new_resource.site}');
-# define( 'WP_SITEURL', 'https://#{new_resource.site}');
-# define( 'DISALLOW_FILE_EDIT', true);
-# define( 'DISALLOW_FILE_MODS', true);
-# define( 'AUTOMATIC_UPDATER_DISABLED', true);
-# define( 'FORCE_SSL_LOGIN', true);
-# define( 'FORCE_SSL_ADMIN', true);
-# define( 'WP_FAIL2BAN_SITE_HEALTH_SKIP_FILTERS', true);
-# define( 'WP_ENVIRONMENT_TYPE', 'production');
-# define( 'WP_MEMORY_LIMIT', '128M');
-# define( 'WP2FA_ENCRYPT_KEY', '#{new_resource.wp2fa_encrypt_key}');
-
-# Volume mount points
-# TMPFS /tmp
-# TMPFS /run
-# Persistent /usr/src/wordpress/wp-content/uploads (wordpress:wordpress)
 
 ENTRYPOINT ["entrypoint-addon.sh"]
 CMD ["apache2-foreground"]
