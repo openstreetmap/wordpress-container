@@ -1,0 +1,29 @@
+{
+  "name": "openstreetmap/wordpress-site",
+  "description": "WordPress site with required plugins",
+  "type": "project",
+  "repositories": [
+    {
+      "type": "composer",
+      "url": "https://wpackagist.org"
+    }
+  ],
+  "require": {
+    "php": ">=7.4",
+    "composer/installers": "^2.0",
+    "wpackagist-plugin/wp-last-login": "*",
+    "wpackagist-plugin/wp-2fa": "*",
+    "wpackagist-plugin/wp-fail2ban": "*"
+  },
+  "extra": {
+    "installer-paths": {
+      "wp-content/plugins/{$name}/": ["type:wordpress-plugin"],
+      "wp-content/themes/{$name}/": ["type:wordpress-theme"]
+    }
+  },
+  "config": {
+    "allow-plugins": {
+      "composer/installers": true
+    }
+  }
+}
